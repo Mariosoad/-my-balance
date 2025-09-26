@@ -31,6 +31,40 @@ type SerialPortLike = SerialPort & {
   setSignals?: (signals: { dataTerminalReady?: boolean; requestToSend?: boolean }) => Promise<void>;
 };
 
+async function writeToken(port: SerialPort, text: string) {
+    const writer = port.writable!.getWriter();
+    const data = new TextEncoder().encode(text);
+    await writer.write(data);
+    writer.releaseLock();
+  }
+  
+  async function readSomeBytes(port: SerialPort, millis = 150): Promise<Uint8Array> {
+    const reader = port.readable!.getReader();
+    const chunks: number[] = [];
+    const deadline = Date.now() + millis;
+  
+    try {
+      while (Date.now() < deadline) {
+        const timeLeft = deadline - Date.now();
+        const oneRead = reader.read(); // promesa de lectura
+        const timeout = new Promise<{ value?: Uint8Array; done?: boolean }>(res =>
+          setTimeout(() => res({ value: undefined, done: false }), Math.max(1, timeLeft))
+        );
+  
+        const { value, done } = await Promise.race([oneRead, timeout]);
+        if (done) break;
+        if (value && value.length) chunks.push(...Array.from(value));
+        // pequeño respiro para evitar loop caliente
+        await new Promise(r => setTimeout(r, 5));
+      }
+    } finally {
+      reader.releaseLock();
+    }
+    return new Uint8Array(chunks);
+  }
+  
+  
+
 const supportsWebSerial = typeof navigator !== "undefined" && "serial" in navigator as any;
 
 // —— Parámetros de auto-detección ——
@@ -92,9 +126,14 @@ export default function ScaleAutoDetectAuto() {
   ) {
     try { readerRef.current?.releaseLock(); } catch {}
     try { await port.close?.(); } catch {}
+    await new Promise(r => setTimeout(r, 60));  // <- pausa
+  
     await port.open({ baudRate, dataBits, parity, stopBits, flowControl: "none" });
     if (port.setSignals) await port.setSignals({ dataTerminalReady: true, requestToSend: true });
+  
+    await new Promise(r => setTimeout(r, 40));  // <- pausa
   }
+  
 
   async function probeOnce(port: SerialPortLike, cfg: DetectedConfig) {
     try {
@@ -143,6 +182,32 @@ export default function ScaleAutoDetectAuto() {
     }
     return null;
   }
+
+  async function loopbackTest(port: SerialPortLike): Promise<boolean> {
+    // Abre con una config tolerante; para loopback cualquier baud sirve si TX=RX.
+    await openWithConfig(port, 9600, 8, "none", 1);
+    // Sube señales por si el puerto las requiere
+    if (port.setSignals) await port.setSignals({ dataTerminalReady: true, requestToSend: true });
+  
+    // Token único + CR para facilitar ver líneas si tu vista usa delimitadores
+    const token = `LBK${Math.floor(Math.random()*1e6)}\r`;
+    await writeToken(port, token);
+  
+    // Espera breve y lee bytes crudos
+    const bytes = await readSomeBytes(port, 250);
+    if (bytes.length === 0) return false;
+  
+    // ¿Volvió el token? Compara por bytes (más robusto que texto)
+    const enc = new TextEncoder().encode(token);
+    const hayEco = bytes.join(",").includes(enc.join(","));
+    // Log opcional en RAW/HEX
+    setLog(p => [
+      `Loopback RX HEX: ${Array.from(bytes).map(b=>b.toString(16).padStart(2,"0")).join(" ")}`,
+      ...p
+    ].slice(0,80));
+    return hayEco;
+  }
+  
 
   async function startReading(port: SerialPortLike, cfg: DetectedConfig) {
     await openWithConfig(port, cfg.baudRate, cfg.dataBits, cfg.parity, cfg.stopBits);
@@ -203,18 +268,34 @@ export default function ScaleAutoDetectAuto() {
     // Si ya hay puertos con permiso, probamos cada uno automáticamente.
     setStatus("Intentando autoconectar…");
     for (const p of ports) {
-      try {
-        const port = p as SerialPortLike;
-        portRef.current = port;
-        const cfg = await autoDetect(port);
-        if (cfg) {
-          currentConfigRef.current = cfg;
-          await startReading(port, cfg);
-          return;
-        }
-      } catch {/* probar siguiente */}
-    }
-    setStatus("No se detectó configuración en puertos permitidos");
+        try {
+          const port = p as SerialPortLike;
+          portRef.current = port;
+    
+          // 1) Intento normal: autodetección (balanza real enviando)
+          const cfg = await autoDetect(port);
+          if (cfg) {
+            currentConfigRef.current = cfg;
+            await startReading(port, cfg);
+            return;
+          }
+    
+          // 2) Plan B: loopback (si estás puenteando 2–3)
+          setStatus("Sin datos de balanza. Probando loopback…");
+          const ok = await loopbackTest(port);
+          if (ok) {
+            setStatus("Loopback detectado (eco OK). El puerto funciona.");
+            setActive(true);
+            setConfigLabel("Loopback @9600");
+            setRawLine("ECO OK");
+            setWeight("-");
+            return;
+          } else {
+            setLog(p => ["Loopback: no se recibió eco.", ...p].slice(0,80));
+          }
+        } catch {/* prueba siguiente */}
+      }
+      setStatus("No se detectó balanza ni loopback en puertos permitidos");
   }
 
   async function cleanup() {
