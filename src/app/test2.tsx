@@ -345,7 +345,7 @@ export default function ScaleAuto() {
   }, []);
 
   return (
-    <div style={{ maxWidth: 680, margin: "40px auto", fontFamily: "system-ui, Arial" }}>
+    <div style={{ maxWidth: 1580, margin: "40px auto", fontFamily: "system-ui, Arial" }}>
       <h1>Lectura Balanza</h1>
 
       <div style={{ padding: 12, border: "1px solid #ddd", borderRadius: 8, marginBottom: 12 }}>
