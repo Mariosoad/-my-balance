@@ -68,12 +68,12 @@ async function writeToken(port: SerialPort, text: string) {
 const supportsWebSerial = typeof navigator !== "undefined" && "serial" in navigator as any;
 
 // —— Parámetros de auto-detección ——
-const BAUDS = [1200, 2400, 4800, 9600, 19200] as const;
+const BAUDS = [1200] as const;
 const SETUPS = [
-  { dataBits: 8 as const, parity: "none" as const, stopBits: 1 as const, name: "8N1" },
-  { dataBits: 7 as const, parity: "even" as const, stopBits: 1 as const, name: "7E1" },
-];
-const DELIMS = ["\r", "\r\n", "\n"] as const;
+    { dataBits: 7 as const, parity: "none" as const, stopBits: 1 as const, name: "7N1" },
+    { dataBits: 8 as const, parity: "none" as const, stopBits: 1 as const, name: "8N1" }, // por si acaso
+  ];
+  const DELIMS = ["\r"] as const; // fin de línea CR
 const PROBE_MS = 1800; // escucha por combinación
 
 const weightRegex = /([+\-]?\d{1,6}(?:[.,]\d{1,3})?)/;
@@ -117,21 +117,21 @@ export default function ScaleAutoDetectAuto() {
   const keepReadingRef = useRef<boolean>(false);
   const currentConfigRef = useRef<DetectedConfig | null>(null);
 
-  async function openWithConfig(
-    port: SerialPortLike,
-    baudRate: number,
-    dataBits: 7 | 8,
-    parity: "none" | "even",
-    stopBits: 1
-  ) {
+  async function openWithConfig(port: SerialPortLike, baudRate: number, dataBits: 7|8, parity: "none"|"even", stopBits: 1) {
     try { readerRef.current?.releaseLock(); } catch {}
     try { await port.close?.(); } catch {}
-    await new Promise(r => setTimeout(r, 60));  // <- pausa
+    await new Promise(r => setTimeout(r, 60));
   
-    await port.open({ baudRate, dataBits, parity, stopBits, flowControl: "none" });
-    if (port.setSignals) await port.setSignals({ dataTerminalReady: true, requestToSend: true });
-  
-    await new Promise(r => setTimeout(r, 40));  // <- pausa
+    try {
+      await port.open({ baudRate, dataBits, parity, stopBits, flowControl: "none" });
+      if (port.setSignals) await port.setSignals({ dataTerminalReady: true, requestToSend: true });
+    } catch (e: any) {
+      const msg = String(e?.message ?? e);
+      setLog(p => [`[openWithConfig error] ${msg}`, ...p].slice(0,80));
+      setStatus(`Error abriendo puerto: ${msg}`);
+      throw e; // re-lanza para que la autodetección pruebe otra combinación
+    }
+    await new Promise(r => setTimeout(r, 40));
   }
   
 
@@ -157,9 +157,10 @@ export default function ScaleAutoDetectAuto() {
       }
       reader.releaseLock();
       return { ok: false };
-    } catch {
-      return { ok: false };
-    }
+    } catch (e: any) {
+        setLog(p => [`[probeOnce] fallo en ${cfg.name}: ${String(e?.message ?? e)}`, ...p].slice(0,80));
+        return { ok: false };
+      }
   }
 
   async function autoDetect(port: SerialPortLike): Promise<DetectedConfig | null> {
