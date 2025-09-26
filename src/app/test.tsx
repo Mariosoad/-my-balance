@@ -248,13 +248,13 @@ export default function ScaleAutoDetectAuto() {
   }, []);
 
   return (
-    <div style={{ maxWidth: 560, margin: "40px auto", fontFamily: "system-ui, Arial" }}>
+    <div style={{ maxWidth: 600, margin: "40px auto", fontFamily: "system-ui, Arial" }}>
       <h1>Lectura Balanza</h1>
-      <div style={{ padding: 12, border: "1px solid #ddd", alignItems: 'left', justifyContent: 'left', borderRadius: 8, marginBottom: 12, display: "flex", flexDirection: 'column', gap: 12 }}>
+      <div style={{ padding: 12, border: "1px solid #ddd", alignItems: 'left', justifyContent: 'left', borderRadius: 8, marginBottom: 12, display: "flex", flexDirection: 'column', gap: 12, width: '600px' }}>
         <div><strong>Estado:</strong> {status}</div>
         <div><strong>Config:</strong> {configLabel}</div>
       </div>
-      <div style={{ padding: 12, border: "1px solid #ddd", borderRadius: 8, marginBottom: 12, display: "flex", flexDirection: 'column', gap: 12, alignItems: "left" }}>
+      <div style={{ padding: 12, border: "1px solid #ddd", borderRadius: 8, marginBottom: 12, display: "flex", flexDirection: 'column', gap: 12, alignItems: "left", width: '600px' }}>
         <div><strong>Balanza:</strong> <span style={{ color: active ? "#0a7" : "#c33", fontWeight: 700, fontSize: 22 }}>{active ? "ACTIVO" : "INACTIVO"}</span></div>
       </div>
 
