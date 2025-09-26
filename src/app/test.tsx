@@ -249,7 +249,7 @@ export default function ScaleAutoDetectAuto() {
 
   return (
     <div style={{ maxWidth: 760, margin: "40px auto", fontFamily: "system-ui, Arial" }}>
-      <h1>Lectura Balanza (Auto)</h1>
+      <h1>Lectura Balanza</h1>
       <div style={{ padding: 12, border: "1px solid #ddd", borderRadius: 8, marginBottom: 12, display: "flex", gap: 12, alignItems: "center" }}>
         <div><strong>Estado:</strong> {status}</div>
         <div><strong>Config:</strong> {configLabel}</div>
@@ -257,7 +257,7 @@ export default function ScaleAutoDetectAuto() {
       </div>
 
       {hint && (
-        <div style={{ padding: 12, border: "1px dashed #f0a", borderRadius: 8, background: "#fff0fa", marginBottom: 16 }}>
+        <div style={{ padding: 12, color: 'red', textAlign: 'center', border: "1px dashed red", borderRadius: 8, marginBottom: 16 }}>
           {hint}
         </div>
       )}
