@@ -1,15 +1,8 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 'use client'
-import React, { useRef, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 
-/**
- * Web Serial auto-detect for industrial scale
- * - Tries common combinations until it finds readable weight lines.
- * - Shows Active/Inactive and last weight parsed.
- * Requirements: HTTPS (or localhost) + Chrome/Edge desktop.
- */
-
-// Web Serial API type declarations
+// —— Tipos Web Serial mínimos ——
 declare global {
   interface SerialPort {
     readable: ReadableStream<Uint8Array> | null;
@@ -17,7 +10,6 @@ declare global {
     open(options: SerialOptions): Promise<void>;
     close(): Promise<void>;
   }
-
   interface SerialOptions {
     baudRate: number;
     dataBits?: 7 | 8;
@@ -26,43 +18,35 @@ declare global {
     bufferSize?: number;
     flowControl?: "none" | "hardware";
   }
-
   interface Navigator {
     serial: {
       requestPort(): Promise<SerialPort>;
       getPorts(): Promise<SerialPort[]>;
+      onconnect: (e: any) => void;
+      ondisconnect: (e: any) => void;
     };
   }
 }
-
 type SerialPortLike = SerialPort & {
   setSignals?: (signals: { dataTerminalReady?: boolean; requestToSend?: boolean }) => Promise<void>;
 };
 
-const supportsWebSerial = "serial" in navigator;
+const supportsWebSerial = typeof navigator !== "undefined" && "serial" in navigator as any;
 
-// Combinaciones de prueba (ordenadas de más probables a menos)
+// —— Parámetros de auto-detección ——
 const BAUDS = [1200, 2400, 4800, 9600, 19200] as const;
 const SETUPS = [
   { dataBits: 8 as const, parity: "none" as const, stopBits: 1 as const, name: "8N1" },
   { dataBits: 7 as const, parity: "even" as const, stopBits: 1 as const, name: "7E1" },
 ];
 const DELIMS = ["\r", "\r\n", "\n"] as const;
+const PROBE_MS = 1800; // escucha por combinación
 
-// Tiempo de escucha por intento (ms)
-const PROBE_MS = 2000;
-
-// Expresión para detectar un número de peso (ej. "+12.34", " 0012,3")
 const weightRegex = /([+\-]?\d{1,6}(?:[.,]\d{1,3})?)/;
-
-/** Intenta parsear un número de una línea RAW; devuelve null si no hay match. */
 function parseWeight(raw: string): string | null {
-  const s = raw.replace(/\s+/g, " ").trim();
-  const m = s.match(weightRegex);
+  const m = raw.trim().match(weightRegex);
   return m ? m[1].replace(",", ".") : null;
 }
-
-/** Transforma bytes a líneas usando un delimitador. */
 function makeLineTransformer(delimiter = "\r") {
   let buffer = "";
   return new TransformStream<string, string>({
@@ -72,9 +56,7 @@ function makeLineTransformer(delimiter = "\r") {
       buffer = parts.pop() ?? "";
       for (const p of parts) controller.enqueue(p);
     },
-    flush(controller) {
-      if (buffer) controller.enqueue(buffer);
-    },
+    flush(controller) { if (buffer) controller.enqueue(buffer); }
   });
 }
 
@@ -84,17 +66,18 @@ type DetectedConfig = {
   parity: "none" | "even";
   stopBits: 1;
   delimiter: "\r" | "\r\n" | "\n";
-  name: string; // ej. "1200 8N1 CR"
+  name: string;
 };
 
-export default function ScaleAutoDetect() {
-  const [status, setStatus] = useState<string>(supportsWebSerial ? "Listo para conectar" : "Web Serial no soportado");
+export default function ScaleAutoDetectAuto() {
+  const [status, setStatus] = useState<string>(supportsWebSerial ? "Inicializando…" : "Web Serial no soportado");
   const [active, setActive] = useState<boolean>(false);
   const [weight, setWeight] = useState<string>("-");
   const [rawLine, setRawLine] = useState<string>("-");
   const [configLabel, setConfigLabel] = useState<string>("-");
-  const [log, setLog] = useState<string[]>([]);
+  const [hint, setHint] = useState<string>("");
 
+  const [log, setLog] = useState<string[]>([]);
   const portRef = useRef<SerialPortLike | null>(null);
   const readerRef = useRef<ReadableStreamDefaultReader<string> | null>(null);
   const keepReadingRef = useRef<boolean>(false);
@@ -107,22 +90,15 @@ export default function ScaleAutoDetect() {
     parity: "none" | "even",
     stopBits: 1
   ) {
-    // Cerrar si estaba abierto
-    try {
-      if ((port as any).readable) readerRef.current?.releaseLock();
-      if (port.close) await port.close();
-    } catch {}
-    // Abrir con la config
-    await port.open({ baudRate, dataBits, parity, stopBits, flowControl: "none" as const });
-    // Elevar señales por si el equipo las necesita
+    try { readerRef.current?.releaseLock(); } catch {}
+    try { await port.close?.(); } catch {}
+    await port.open({ baudRate, dataBits, parity, stopBits, flowControl: "none" });
     if (port.setSignals) await port.setSignals({ dataTerminalReady: true, requestToSend: true });
   }
 
-  /** Prueba una combinación (framing/baud/terminador) durante PROBE_MS; retorna peso si hay match. */
-  async function probeOnce(port: SerialPortLike, cfg: DetectedConfig): Promise<{ ok: boolean; sample?: string; raw?: string }> {
+  async function probeOnce(port: SerialPortLike, cfg: DetectedConfig) {
     try {
       await openWithConfig(port, cfg.baudRate, cfg.dataBits, cfg.parity, cfg.stopBits);
-
       const decoder = new TextDecoderStream("ascii", { fatal: false, ignoreBOM: true });
       const lined = port.readable!.pipeThrough(decoder as any).pipeThrough(makeLineTransformer(cfg.delimiter));
       const reader = lined.getReader();
@@ -132,10 +108,8 @@ export default function ScaleAutoDetect() {
         const { value, done } = await reader.read();
         if (done) break;
         if (typeof value !== "string") continue;
-
         const raw = value.trim();
         if (!raw) continue;
-
         const parsed = parseWeight(raw);
         if (parsed) {
           reader.releaseLock();
@@ -149,25 +123,19 @@ export default function ScaleAutoDetect() {
     }
   }
 
-  /** Intenta todas las combinaciones conocidas hasta encontrar una válida. */
   async function autoDetect(port: SerialPortLike): Promise<DetectedConfig | null> {
     for (const b of BAUDS) {
       for (const s of SETUPS) {
         for (const d of DELIMS) {
           const cfg: DetectedConfig = {
-            baudRate: b,
-            dataBits: s.dataBits,
-            parity: s.parity,
-            stopBits: 1,
-            delimiter: d,
-            name: `${b} ${s.name} ${d === "\r" ? "CR" : d === "\r\n" ? "CRLF" : "LF"}`,
+            baudRate: b, dataBits: s.dataBits, parity: s.parity, stopBits: 1, delimiter: d,
+            name: `${b} ${s.name} ${d === "\r" ? "CR" : d === "\r\n" ? "CRLF" : "LF"}`
           };
           setStatus(`Probando ${cfg.name}…`);
           const r = await probeOnce(port, cfg);
           if (r.ok) {
-            setLog((prev) => [`✔ Detectado con ${cfg.name} | Ej: RAW='${r.raw}' Peso=${r.sample}`, ...prev].slice(0, 100));
-            setRawLine(r.raw!);
-            setWeight(r.sample!);
+            setRawLine(r.raw!); setWeight(r.sample!);
+            setLog(p => [`✔ Detectado ${cfg.name} | RAW='${r.raw}' Peso=${r.sample}`, ...p].slice(0, 80));
             return cfg;
           }
         }
@@ -176,120 +144,134 @@ export default function ScaleAutoDetect() {
     return null;
   }
 
-  /** Conectar y auto-detectar */
-  async function connect() {
-    try {
-      if (!supportsWebSerial) throw new Error("Este navegador no soporta Web Serial.");
-      setStatus("Solicitando puerto…");
-      const port = (await (navigator as any).serial.requestPort()) as SerialPortLike;
-      portRef.current = port;
+  async function startReading(port: SerialPortLike, cfg: DetectedConfig) {
+    await openWithConfig(port, cfg.baudRate, cfg.dataBits, cfg.parity, cfg.stopBits);
+    const decoder = new TextDecoderStream("ascii", { fatal: false, ignoreBOM: true });
+    const lined = port.readable!.pipeThrough(decoder as any).pipeThrough(makeLineTransformer(cfg.delimiter));
+    const reader = lined.getReader();
+    readerRef.current = reader;
 
-      setStatus("Auto-detectando…");
-      const cfg = await autoDetect(port);
-      if (!cfg) {
-        setActive(false);
-        setStatus("No se pudo detectar configuración");
-        setConfigLabel("-");
-        return;
+    keepReadingRef.current = true;
+    setActive(true);
+    setStatus("Activo (leyendo)");
+    setConfigLabel(cfg.name);
+
+    (async () => {
+      while (keepReadingRef.current) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        if (typeof value !== "string") continue;
+        const raw = value.trim();
+        if (!raw) continue;
+        setRawLine(raw);
+        const parsed = parseWeight(raw);
+        if (parsed) setWeight(parsed);
       }
-      currentConfigRef.current = cfg;
-      setConfigLabel(cfg.name);
-
-      // Re-abrimos con la configuración final y nos quedamos leyendo
-      await openWithConfig(port, cfg.baudRate, cfg.dataBits, cfg.parity, cfg.stopBits);
-
-      const decoder = new TextDecoderStream("ascii", { fatal: false, ignoreBOM: true });
-      const lined = port.readable!.pipeThrough(decoder as any).pipeThrough(makeLineTransformer(cfg.delimiter));
-      const reader = lined.getReader();
-      readerRef.current = reader;
-
-      setActive(true);
-      setStatus("Activo (leyendo)");
-
-      keepReadingRef.current = true;
-      (async () => {
-        while (keepReadingRef.current) {
-          const { value, done } = await reader.read();
-          if (done) break;
-          if (typeof value !== "string") continue;
-          const raw = value.trim();
-          if (!raw) continue;
-          setRawLine(raw);
-          const parsed = parseWeight(raw);
-          if (parsed) setWeight(parsed);
-          setLog((prev) => [`RAW='${raw}' → ${parsed ?? "?"}`, ...prev].slice(0, 100));
-        }
-      })().catch((e) => setLog((p) => [`Error lectura: ${String(e)}`, ...p]));
-    } catch (e: any) {
-      setStatus(`Error: ${e?.message ?? e}`);
-      setActive(false);
-    }
+    })().catch(e => setLog(p => [`Error lectura: ${String(e)}`, ...p]));
   }
 
-  async function disconnect() {
+  async function tryAutoConnectWithGrantedPorts() {
+    setStatus("Buscando puertos permitidos…");
+    const ports = await navigator.serial.getPorts();
+    if (!ports || ports.length === 0) {
+      setStatus("Permiso requerido");
+      setHint("Haz clic o presiona cualquier tecla para autorizar el puerto.");
+      // un solo gesto para solicitar permiso
+      const once = async () => {
+        try {
+          setStatus("Solicitando permiso…");
+          const port = await navigator.serial.requestPort();
+          portRef.current = port as SerialPortLike;
+          setHint("");
+          setStatus("Auto-detectando…");
+          const cfg = await autoDetect(portRef.current);
+          if (!cfg) { setStatus("No se detectó configuración"); setActive(false); return; }
+          currentConfigRef.current = cfg;
+          await startReading(portRef.current, cfg);
+        } catch (e: any) {
+          setStatus(`Error: ${e?.message ?? e}`);
+        } finally {
+          window.removeEventListener("click", once);
+          window.removeEventListener("keydown", once);
+        }
+      };
+      window.addEventListener("click", once, { once: true });
+      window.addEventListener("keydown", once, { once: true });
+      return;
+    }
+
+    // Si ya hay puertos con permiso, probamos cada uno automáticamente.
+    setStatus("Intentando autoconectar…");
+    for (const p of ports) {
+      try {
+        const port = p as SerialPortLike;
+        portRef.current = port;
+        const cfg = await autoDetect(port);
+        if (cfg) {
+          currentConfigRef.current = cfg;
+          await startReading(port, cfg);
+          return;
+        }
+      } catch {/* probar siguiente */}
+    }
+    setStatus("No se detectó configuración en puertos permitidos");
+  }
+
+  async function cleanup() {
     keepReadingRef.current = false;
-    try {
-      readerRef.current?.releaseLock();
-    } catch {}
-    try {
-      await portRef.current?.close?.();
-    } catch {}
+    try { readerRef.current?.releaseLock(); } catch {}
+    try { await portRef.current?.close?.(); } catch {}
     portRef.current = null;
     setActive(false);
-    setStatus("Desconectado");
   }
+
+  useEffect(() => {
+    if (!supportsWebSerial) return;
+
+    // Autoconectar al cargar
+    tryAutoConnectWithGrantedPorts();
+
+    // Autoconectar si enchufan la balanza luego
+    const onConnect = async () => {
+      if (active) return;
+      tryAutoConnectWithGrantedPorts();
+    };
+    const onDisconnect = async () => {
+      setStatus("Desconectado");
+      cleanup();
+    };
+    (navigator.serial as any).onconnect = onConnect;
+    (navigator.serial as any).ondisconnect = onDisconnect;
+
+    return () => { cleanup(); (navigator.serial as any).onconnect = null; (navigator.serial as any).ondisconnect = null; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   return (
     <div style={{ maxWidth: 760, margin: "40px auto", fontFamily: "system-ui, Arial" }}>
-      <h1>Lectura Balanza</h1>
-      {/* <p style={{ marginTop: 0, color: "#666" }}>
-        Requiere Chrome/Edge en <strong>HTTPS</strong> (o localhost). Elige el puerto al conectar.
-      </p> */}
-      <br />
-
-      <div style={{ display: "flex", gap: 12, alignItems: "center", marginBottom: 16 }}>
-        <button onClick={connect} disabled={!supportsWebSerial || !!portRef.current}>
-          Conectar
-        </button>
-        <button onClick={disconnect} disabled={!portRef.current}>
-          Desconectar
-        </button>
-        <span>
-          <strong>Estado:</strong> {status}
-        </span>
-        <span>
-          <strong>Config:</strong> {configLabel}
-        </span>
-        <span>
-          <strong>Puerto:</strong> {portRef.current ? "Conectado" : "—"}
-        </span>
+      <h1>Lectura Balanza (Auto)</h1>
+      <div style={{ padding: 12, border: "1px solid #ddd", borderRadius: 8, marginBottom: 12, display: "flex", gap: 12, alignItems: "center" }}>
+        <div><strong>Estado:</strong> {status}</div>
+        <div><strong>Config:</strong> {configLabel}</div>
+        <div><strong>Balanza:</strong> <span style={{ color: active ? "#0a7" : "#c33", fontWeight: 700 }}>{active ? "ACTIVO" : "INACTIVO"}</span></div>
       </div>
+
+      {hint && (
+        <div style={{ padding: 12, border: "1px dashed #f0a", borderRadius: 8, background: "#fff0fa", marginBottom: 16 }}>
+          {hint}
+        </div>
+      )}
 
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
         <div style={{ padding: 12, border: "1px solid #ddd", borderRadius: 8 }}>
-          <div style={{ fontSize: 12, color: "#666" }}>Estado balanza</div>
-          <div style={{ fontSize: 28, fontWeight: 700, color: active ? "#0a7" : "#c33" }}>
-            {active ? "ACTIVO" : "INACTIVO"}
-          </div>
-          <div style={{ fontSize: 12, color: "#666", marginTop: 6 }}>Auto-detect: baudios · framing · terminador</div>
-        </div>
-        <div style={{ padding: 12, border: "1px solid #ddd", borderRadius: 8 }}>
           <div style={{ fontSize: 12, color: "#666" }}>Peso</div>
-          <div style={{ fontSize: 40, fontWeight: 800 }}>{weight}</div>
+          <div style={{ fontSize: 44, fontWeight: 800 }}>{weight}</div>
           <div style={{ fontSize: 12, color: "#666", marginTop: 6 }}>Último RAW: <code>{rawLine}</code></div>
         </div>
+        <pre style={{ height: 180, overflow: "auto", background: "#0a0a0a", color: "#c3f3c3", padding: 12, borderRadius: 8, margin: 0 }}>
+          {log.join("\n")}
+        </pre>
       </div>
-
-      <h3 style={{ marginTop: 24 }}>Log</h3>
-      <pre style={{ height: 220, overflow: "auto", background: "#0a0a0a", color: "#c3f3c3", padding: 12, borderRadius: 8 }}>
-        {log.join("\n")}
-      </pre>
-
-      {!supportsWebSerial && (
-        <div style={{ marginTop: 12, padding: 12, background: "#fff4e5", border: "1px solid #ffd399", borderRadius: 8 }}>
-          Tu navegador no soporta Web Serial. Usá Chrome/Edge desktop.
-        </div>
-      )}
     </div>
   );
 }
