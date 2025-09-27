@@ -2,7 +2,7 @@
 'use client'
 import React, { useEffect, useRef, useState } from "react";
 
-// --- Tipos mínimos Web Serial ---
+/* ==== Tipos mínimos Web Serial ==== */
 declare global {
   interface SerialPort {
     readable: ReadableStream<Uint8Array> | null;
@@ -28,56 +28,68 @@ declare global {
     };
   }
 }
-
 type SerialPortLike = SerialPort & {
   setSignals?: (signals: { dataTerminalReady?: boolean; requestToSend?: boolean }) => Promise<void>;
 };
 
 const supportsWebSerial = typeof navigator !== "undefined" && "serial" in navigator as any;
 
-// --- Config por defecto (Latorre L1001 / simulador) ---
+/* ==== Config puerto y parsing ==== */
 const BAUD = 1200;
-const DATABITS: 7 | 8 = 7;          // 7N1
+const DATABITS: 7 | 8 = 7;                 // 7N1 (cambiá a 8 si tu equipo está en 8N1)
 const PARITY: "none" | "even" = "none";
 const STOPBITS: 1 = 1 as const;
 const DELIM = "\r";
 
-/**
- * FACTOR DE ESCALA para los 5 dígitos Latorre:
- * - Si los 5 dígitos representan GRAMOS -> 0.001 para mostrar en kg.
- * - Si ya representan KG -> 1.
- * Ajustá según tu balanza real.
- */
-const SCALE_FACTOR: number = 0.001; // asume 5 dígitos = gramos → mostramos kg
+/** Modo de interpretación del string entrante */
+type Mode = "AUTO" | "GRAMS5_P" | "GRAMS5" | "KG5";
+const MODE: Mode = "AUTO";
 
-// --- Utilidades/parsers ---
-const genericNumberRegex = /([+\-]?\d{1,6}(?:[.,]\d{1,3})?)/;
+/** Si MODE="AUTO" y llega solo 5 dígitos, ¿asumimos gramos o kg? */
+const ASSUME_5DIGITS_IS: "GRAMS" | "KG" = "GRAMS";
 
-/** Parser específico Latorre: 'S 00000' (S=P/N/T/B/R, espacio opcional, 5 dígitos) */
-function parseLatorre5(raw: string): { value: number; valueStr: string; source: string } | null {
-  const s = raw.trim();
-  // admite P, N, T, B, R por si sale neto/tara/estable
-  const m = s.match(/^([PN TBR])\s?(\d{5})$/i);
-  if (!m) return null;
-  const code = m[1].toUpperCase();
-  const digits = m[2];
-  const integer = parseInt(digits, 10);
-  if (Number.isNaN(integer)) return null;
+/** Factores para convertir a kg */
+const FACTOR = {
+  GRAMS: 0.001, // 25000 -> 25.000 kg
+  KG: 1
+};
 
-  const val = integer * SCALE_FACTOR;
-  // formateo amigable (3 decimales si hace falta)
-  const valueStr = (val === integer ? integer.toString() : val.toFixed(3).replace(/\.?0+$/,''));
-  return { value: val, valueStr, source: `L1001(${code})` };
-}
+/* ==== Utils parsers ==== */
+type ParseResult = {
+  ok: boolean;
+  raw: string;
+  kg?: number;
+  source?: "GRAMS5_P" | "GRAMS5" | "KG5" | "GENERIC";
+  flag?: "P" | "N" | "T" | "B" | "R";
+};
+function parseLineByMode(rawIn: string, mode: Mode): ParseResult {
+  const raw = rawIn.trim();
 
-/** Parser genérico: números con coma/punto, por si alguna versión manda ' 12.34' */
-function parseGeneric(raw: string): { value: number; valueStr: string; source: string } | null {
-  const m = raw.trim().match(genericNumberRegex);
-  if (!m) return null;
-  const normalized = m[1].replace(",", ".");
-  const num = Number(normalized);
-  if (!Number.isFinite(num)) return null;
-  return { value: num, valueStr: normalized, source: "GEN" };
+  // Prefijo + 5 dígitos (P/N/T/B/R)
+  const withFlag = raw.match(/^([PNTBR])\s?(\d{5})$/i);
+  if (withFlag) {
+    const v = Number(withFlag[2]) * FACTOR.GRAMS;
+    return { ok: true, raw, kg: v, source: "GRAMS5_P", flag: withFlag[1].toUpperCase() as any };
+  }
+
+  // Solo 5 dígitos
+  const only5 = raw.match(/^(\d{5})$/);
+  if (only5) {
+    if (mode === "KG5" || (mode === "AUTO" && ASSUME_5DIGITS_IS === "KG")) {
+      return { ok: true, raw, kg: Number(only5[1]) * FACTOR.KG, source: "KG5" };
+    } else {
+      return { ok: true, raw, kg: Number(only5[1]) * FACTOR.GRAMS, source: "GRAMS5" };
+    }
+  }
+
+  // Genérico (números con . o ,)
+  const gen = raw.match(/([+\-]?\d{1,6}(?:[.,]\d{1,3})?)/);
+  if (gen) {
+    const v = Number(gen[1].replace(",", "."));
+    return { ok: Number.isFinite(v), raw, kg: v, source: "GENERIC" };
+  }
+
+  return { ok: false, raw };
 }
 
 function makeLineTransformer(delimiter = "\r") {
@@ -96,7 +108,8 @@ function hex(buf: Uint8Array) {
   return Array.from(buf).map(b => b.toString(16).padStart(2, "0")).join(" ");
 }
 
-export default function VirtualScaleTester() {
+/* ==== Componente ==== */
+export default function LatorreReader() {
   const [status, setStatus]   = useState<string>(supportsWebSerial ? "Listo para conectar" : "Web Serial no soportado");
   const [weight, setWeight]   = useState<string>("-");
   const [rawLine, setRawLine] = useState<string>("-");
@@ -126,12 +139,12 @@ export default function VirtualScaleTester() {
   async function connect() {
     try {
       if (!supportsWebSerial) throw new Error("Navegador sin Web Serial");
-      setStatus("Selecciona el puerto virtual (el opuesto al feeder)...");
+      setStatus("Selecciona el puerto (el opuesto al feeder)...");
       const port = await navigator.serial.requestPort();
       portRef.current = port as SerialPortLike;
 
       setPortInfo(describePort(portRef.current));
-      setStatus(`Abriendo puerto @ ${BAUD} ${DATABITS}${PARITY === "none" ? "N" : "E"}${STOPBITS}…`);
+      setStatus(`Abriendo @ ${BAUD} ${DATABITS}${PARITY === "none" ? "N" : "E"}${STOPBITS}…`);
       await openPort(portRef.current);
 
       const decoder = new TextDecoderStream("ascii", { fatal: false, ignoreBOM: true });
@@ -140,7 +153,7 @@ export default function VirtualScaleTester() {
       readerRef.current = reader;
 
       keepRef.current = true;
-      setStatus("Conectado y leyendo…");
+      setStatus(`Conectado y leyendo…  (MODE=${MODE}, assume5=${ASSUME_5DIGITS_IS})`);
 
       (async () => {
         while (keepRef.current) {
@@ -150,31 +163,24 @@ export default function VirtualScaleTester() {
 
           const raw = value.trim();
           if (!raw) continue;
-
           setRawLine(raw);
 
-          // 1) Intento Latorre estricto (P/N/T 00000)
-          const lat = parseLatorre5(raw);
-          if (lat) {
-            setWeight(`${lat.valueStr}`);
-            setLog(p => [`[OK ${lat.source}] RAW='${raw}' → ${lat.valueStr}`, ...p].slice(0,120));
-            continue;
-          }
-
-          // 2) Fallback genérico
-          const gen = parseGeneric(raw);
-          if (gen) {
-            setWeight(`${gen.valueStr}`);
-            setLog(p => [`[OK ${gen.source}] RAW='${raw}' → ${gen.valueStr}`, ...p].slice(0,120));
+          const res = parseLineByMode(raw, MODE);
+          if (res.ok && typeof res.kg === "number") {
+            setWeight(res.kg.toFixed(3));
+            setLog(p => [
+              `[${res.source}${res.flag ? "/" + res.flag : ""}] RAW='${raw}' -> ${res?.kg?.toFixed(3)} kg`,
+              ...p
+            ].slice(0, 200));
           } else {
-            setLog(p => [`[IGNORADO] RAW='${raw}' (no coincide con L1001 ni genérico)`, ...p].slice(0,120));
+            setLog(p => [`[IGN] '${raw}'`, ...p].slice(0, 200));
           }
         }
-      })().catch(e => setLog(p => [`[read loop] ${String(e)}`, ...p].slice(0, 120)));
+      })().catch(e => setLog(p => [`[read loop] ${String(e)}`, ...p].slice(0, 200)));
 
     } catch (e: any) {
       setStatus(`Error: ${e?.message ?? e}`);
-      setLog(p => [`[connect] ${String(e?.message ?? e)}`, ...p].slice(0, 120));
+      setLog(p => [`[connect] ${String(e?.message ?? e)}`, ...p].slice(0, 200));
     }
   }
 
@@ -197,7 +203,7 @@ export default function VirtualScaleTester() {
   }
   function toHex(n: number) { return "0x" + (n >>> 0).toString(16).toUpperCase().padStart(4, "0"); }
 
-  // ver bytes crudos (para diagnóstico rápido)
+  // diagnóstico rápido: bytes crudos
   async function peekBytes() {
     if (!portRef.current?.readable) return;
     const reader = portRef.current.readable.getReader();
@@ -206,14 +212,14 @@ export default function VirtualScaleTester() {
       new Promise<{ value?: Uint8Array }>(res => setTimeout(() => res({}), 150))
     ]);
     reader.releaseLock();
-    if (value?.length) setLog(p => [`[RAW HEX] ${hex(value)}`, ...p].slice(0, 120));
-    else setLog(p => [`[RAW HEX] (sin datos en 150 ms)`, ...p].slice(0, 120));
+    if (value?.length) setLog(p => [`[RAW HEX] ${hex(value)}`, ...p].slice(0, 200));
+    else setLog(p => [`[RAW HEX] (sin datos en 150 ms)`, ...p].slice(0, 200));
   }
 
   useEffect(() => {
     if (!supportsWebSerial) return;
-    const onConnect = () => setLog(p => ["[evento] Nuevo dispositivo serie conectado", ...p].slice(0, 120));
-    const onDisconnect = () => setLog(p => ["[evento] Dispositivo serie desconectado", ...p].slice(0, 120));
+    const onConnect = () => setLog(p => ["[evento] Nuevo dispositivo serie conectado", ...p].slice(0, 200));
+    const onDisconnect = () => setLog(p => ["[evento] Dispositivo serie desconectado", ...p].slice(0, 200));
     navigator.serial.addEventListener("connect", onConnect as any);
     navigator.serial.addEventListener("disconnect", onDisconnect as any);
     return () => {
@@ -225,11 +231,11 @@ export default function VirtualScaleTester() {
   }, []);
 
   return (
-    <div style={{ maxWidth: 780, margin: "40px auto", fontFamily: "system-ui, Arial" }}>
+    <div style={{ maxWidth: 820, margin: "40px auto", fontFamily: "system-ui, Arial", color: "#eee", background: "#111", padding: 16, borderRadius: 10 }}>
       <h1>Lectura Latorre L1001 – Tester Puerto Serie</h1>
-      <p style={{ marginTop: 0, color: "#666" }}>
-        Config: <code>{BAUD} {DATABITS}{PARITY === "none" ? "N" : "E"}{STOPBITS}</code>, fin de línea <code>CR</code> ·
-        Escala: <code>{SCALE_FACTOR === 1 ? "x1 (enteros)" : `x${SCALE_FACTOR} (muestra en kg)`}</code>
+      <p style={{ marginTop: 0, color: "#aaa" }}>
+        Config puerto: <code>{BAUD} {DATABITS}{PARITY === "none" ? "N" : "E"}{STOPBITS}</code> · fin de línea <code>CR</code> ·
+        Modo parser: <code>{MODE}</code> {MODE==="AUTO" && <> (5 dígitos =&nbsp;<code>{ASSUME_5DIGITS_IS}</code>)</>}
       </p>
 
       <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 12 }}>
@@ -240,14 +246,16 @@ export default function VirtualScaleTester() {
       </div>
 
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-        <div style={{ padding: 12, border: "1px solid #ddd", borderRadius: 8 }}>
-          <div style={{ fontSize: 12, color: "#666" }}>Último RAW</div>
+        <div style={{ padding: 12, border: "1px solid #333", borderRadius: 8 }}>
+          <div style={{ fontSize: 12, color: "#999" }}>Puerto</div>
+          <div><code>{portInfo}</code></div>
+          <div style={{ marginTop: 8, fontSize: 12, color: "#999" }}>Último RAW</div>
           <div style={{ fontSize: 24 }}>{rawLine}</div>
-          <div style={{ marginTop: 8, fontSize: 12, color: "#666" }}>Peso</div>
-          <div style={{ fontSize: 40, fontWeight: 700 }}>{weight}</div>
+          <div style={{ marginTop: 8, fontSize: 12, color: "#999" }}>Peso (kg)</div>
+          <div style={{ fontSize: 40, fontWeight: 800 }}>{weight}</div>
         </div>
 
-        <pre style={{ height: 260, overflow: "auto", background: "#0a0a0a", color: "#c3f3c3", padding: 12, borderRadius: 8, margin: 0 }}>
+        <pre style={{ height: 280, overflow: "auto", background: "#0a0a0a", color: "#c3f3c3", padding: 12, borderRadius: 8, margin: 0 }}>
           {log.join("\n")}
         </pre>
       </div>
