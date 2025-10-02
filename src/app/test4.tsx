@@ -222,7 +222,7 @@ export default function LatorreReader() {
 
   return (
     <div style={{ maxWidth: 820, margin: "40px auto", fontFamily: "system-ui, Arial", color: "#eee", background: "#111", padding: 16, borderRadius: 10 }}>
-      <h1>Lectura La Torre L1001 – Test - Option 1</h1>
+      <h1>Lectura La Torre L1001 – Test - Option 2</h1>
       <p style={{ marginTop: 0, color: "#aaa" }}>
         Config puerto: <code>{BAUD} {modeStr()}</code> · fin de línea <code>{DELIM === "\r\n" ? "CRLF" : "CR"}</code> · Formato esperado <code>D######</code>
       </p>
