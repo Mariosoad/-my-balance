@@ -35,12 +35,30 @@ type SerialPortLike = SerialPort & {
 
 const supportsWebSerial = typeof navigator !== "undefined" && "serial" in (navigator as any);
 
-/* ==== Config La Torre ==== */
+/* =====================================================================================
+   Config La Torre
+   - Arrancamos con Opción 1 (7N1).
+   - Para probar otra, comentá la activa y descomentá la que quieras.
+===================================================================================== */
 const BAUD = 1200;
-const DATABITS: 7 | 8 = 7;          // 7 bits de datos
-const PARITY: "even" = "even";      // paridad E
-const STOPBITS: 1 | 2 = 1;          // 1 bit de parada
-const DELIM = "\r";                  // fin de línea CR
+
+/** ---------------- Opción 1: 7N1 (recomendada para descartar ParityError) -------- */
+const DATABITS: 7 | 8 = 7;
+const PARITY: "none" | "even" | "odd" = "none";
+const STOPBITS: 1 | 2 = 1;
+const DELIM: string = "\r"; // CR
+
+/** ---------------- Opción 2: 8N1 ----------------------------------------------- **/
+// const DATABITS: 7 | 8 = 8;
+// const PARITY: "none" | "even" | "odd" = "none";
+// const STOPBITS: 1 | 2 = 1;
+// const DELIM = "\r";
+
+/** ---------------- Opción 3: 7E1 con CRLF ------------------------------------- **/
+// const DATABITS: 7 | 8 = 7;
+// const PARITY: "none" | "even" | "odd" = "even";
+// const STOPBITS: 1 | 2 = 1;
+// const DELIM = "\r\n";
 
 /* ==== Utils ==== */
 function makeLineTransformer(delimiter = "\r") {
@@ -60,6 +78,10 @@ function makeLineTransformer(delimiter = "\r") {
 function hex(buf: Uint8Array) {
   return Array.from(buf).map(b => b.toString(16).padStart(2, "0")).join(" ");
 }
+function modeStr() {
+  const p = PARITY === "none" ? "N" : PARITY === "even" ? "E" : "O";
+  return `${DATABITS}${p}${STOPBITS}`;
+}
 
 /* ==== Parser específico La Torre ==== */
 /** Ejemplo crudo: "D025500"  ->  25.500 kg */
@@ -67,9 +89,9 @@ function parseLaTorre(rawIn: string): { ok: boolean; raw: string; kg?: number } 
   const raw = rawIn.trim();
   const m = raw.match(/^D(\d{6})$/i);
   if (!m) return { ok: false, raw };
-  const grams = Number(m[1]);              // 025500
+  const grams = Number(m[1]); // 025500
   if (!Number.isFinite(grams)) return { ok: false, raw };
-  return { ok: true, raw, kg: grams / 1000 }; // a kg con 3 decimales
+  return { ok: true, raw, kg: grams / 1000 }; // kg con 3 decimales
 }
 
 /* ==== Componente ==== */
@@ -104,8 +126,9 @@ export default function LatorreReader() {
   function describePort(p: SerialPort) {
     try {
       const info = (p.getInfo?.() ?? {}) as any;
-      const vid = info.usbVendorId ? "VID 0x" + (info.usbVendorId >>> 0).toString(16).toUpperCase().padStart(4, "0") : "";
-      const pid = info.usbProductId ? "PID 0x" + (info.usbProductId >>> 0).toString(16).toUpperCase().padStart(4, "0") : "";
+      const toHex = (n: number) => "0x" + (n >>> 0).toString(16).toUpperCase().padStart(4, "0");
+      const vid = info.usbVendorId ? `VID ${toHex(info.usbVendorId)}` : "";
+      const pid = info.usbProductId ? `PID ${toHex(info.usbProductId)}` : "";
       return [vid, pid].filter(Boolean).join(" ");
     } catch { return "—"; }
   }
@@ -119,7 +142,7 @@ export default function LatorreReader() {
       portRef.current = port as SerialPortLike;
       setPortInfo(describePort(portRef.current));
 
-      setStatus(`Abriendo @ ${BAUD} ${DATABITS}E${STOPBITS}…`);
+      setStatus(`Abriendo @ ${BAUD} ${modeStr()}…`);
       await openPort(portRef.current);
 
       const decoder = new TextDecoderStream("ascii", { fatal: false, ignoreBOM: true });
@@ -130,7 +153,7 @@ export default function LatorreReader() {
       readerRef.current = reader;
 
       keepRef.current = true;
-      setStatus(`Conectado y leyendo… (1200 7E1, CR)`);
+      setStatus(`Conectado y leyendo… (${BAUD} ${modeStr()}, ${DELIM === "\r\n" ? "CRLF" : "CR"})`);
 
       (async () => {
         while (keepRef.current) {
@@ -143,10 +166,10 @@ export default function LatorreReader() {
           setRawLine(raw);
 
           const res = parseLaTorre(raw);
-          if (res.ok && typeof res.kg === "number") {
-            setWeight(res.kg?.toFixed(3));
+          if (res.ok && typeof res?.kg === "number") {
+            setWeight(res?.kg?.toFixed(3));
             setLog(p => [
-              `[LATORRE] RAW='${raw}' -> ${res.kg?.toFixed(3)} kg`,
+              `[LATORRE] RAW='${raw}' -> ${res?.kg?.toFixed(3)} kg`,
               ...p
             ].slice(0, 200));
           } else {
@@ -199,9 +222,9 @@ export default function LatorreReader() {
 
   return (
     <div style={{ maxWidth: 820, margin: "40px auto", fontFamily: "system-ui, Arial", color: "#eee", background: "#111", padding: 16, borderRadius: 10 }}>
-      <h1>Lectura La Torre L1001 – Test 02/10/2025</h1>
+      <h1>Lectura La Torre L1001 – Test - Option 1</h1>
       <p style={{ marginTop: 0, color: "#aaa" }}>
-        Config puerto: <code>{BAUD} 7E1</code> · fin de línea <code>CR</code> · Formato esperado <code>D######</code>
+        Config puerto: <code>{BAUD} {modeStr()}</code> · fin de línea <code>{DELIM === "\r\n" ? "CRLF" : "CR"}</code> · Formato esperado <code>D######</code>
       </p>
 
       <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 12 }}>
