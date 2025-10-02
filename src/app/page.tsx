@@ -3,6 +3,7 @@ import styles from "./page.module.css";
 // import ScaleAutoDetect2 from "./test2";
 // import ScaleAutoDetect3 from "./test3";
 import ScaleAutoDetect4 from "./test4";
+// import TestAprobado from "./testAprobado";
 
 export default function Home() {
   return (
@@ -12,6 +13,7 @@ export default function Home() {
         {/* <ScaleAutoDetect2 /> */}
         {/* <ScaleAutoDetect3 /> */}
         <ScaleAutoDetect4 />
+        {/* <TestAprobado /> */}
       </main>
     </div>
   );

@@ -1,9 +1,8 @@
-/* eslint-disable @typescript-eslint/prefer-as-const */
 /* eslint-disable @typescript-eslint/no-explicit-any */
 'use client'
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useRef, useState } from 'react';
 
-/* ==== Tipos mínimos Web Serial (TS) ==== */
+/* ===== Tipos mínimos Web Serial ===== */
 declare global {
   interface SerialPort {
     readable: ReadableStream<Uint8Array> | null;
@@ -16,171 +15,164 @@ declare global {
     baudRate: number;
     dataBits?: 7 | 8;
     stopBits?: 1 | 2;
-    parity?: "none" | "even" | "odd";
+    parity?: 'none' | 'even' | 'odd';
     bufferSize?: number;
-    flowControl?: "none" | "hardware";
+    flowControl?: 'none' | 'hardware';
   }
   interface Navigator {
     serial: {
       requestPort(opts?: { filters?: Array<{ usbVendorId?: number; usbProductId?: number }> }): Promise<SerialPort>;
       getPorts(): Promise<SerialPort[]>;
-      addEventListener(type: "connect" | "disconnect", listener: any): void;
-      removeEventListener(type: "connect" | "disconnect", listener: any): void;
+      addEventListener(type: 'connect' | 'disconnect', listener: any): void;
+      removeEventListener(type: 'connect' | 'disconnect', listener: any): void;
     };
   }
 }
+
 type SerialPortLike = SerialPort & {
   setSignals?: (signals: { dataTerminalReady?: boolean; requestToSend?: boolean }) => Promise<void>;
 };
 
-const supportsWebSerial = typeof navigator !== "undefined" && "serial" in (navigator as any);
+const supportsWebSerial =
+  typeof navigator !== 'undefined' && 'serial' in (navigator as any);
 
-/* =====================================================================================
-   Config La Torre
-   - Arrancamos con Opción 1 (7N1).
-   - Para probar otra, comentá la activa y descomentá la que quieras.
-===================================================================================== */
+/* ===== Config (Opción 2: 8N1 + CR) ===== */
 const BAUD = 1200;
-
-/** ---------------- Opción 1: 7N1 (recomendada para descartar ParityError) -------- */
-// const DATABITS: 7 | 8 = 7;
-// const PARITY: "none" | "even" | "odd" = "none";
-// const STOPBITS: 1 | 2 = 1;
-// const DELIM: string = "\r"; // CR
-
-/** ---------------- Opción 2: 8N1 ----------------------------------------------- **/
 const DATABITS: 7 | 8 = 8;
-const PARITY: "none" | "even" | "odd" = "none";
+const PARITY: 'none' | 'even' | 'odd' = 'none';
 const STOPBITS: 1 | 2 = 1;
-const DELIM: string = "\r";
+const DELIM = '\r';
 
-/** ---------------- Opción 3: 7E1 con CRLF ------------------------------------- **/
-// const DATABITS: 7 | 8 = 7;
-// const PARITY: "none" | "even" | "odd" = "even";
-// const STOPBITS: 1 | 2 = 1;
-// const DELIM = "\r\n";
+/* ===== Afinado de UX =====
+   - Si no recibimos tramas durante este tiempo, “reseteamos” el display a 0.000
+   - Subí/bajá según cómo emita tu indicador La Torre.
+*/
+const FRAME_TIMEOUT_MS = 800;
 
-/* ==== Utils ==== */
-function makeLineTransformer(delimiter = "\r") {
-  let buffer = "";
+/* Pequeño suavizado para evitar que titile si llegan variaciones mínimas */
+const SMOOTH_WINDOW = 3; // promedio móvil simple de N lecturas
+
+/* ===== Utils ===== */
+function makeLineTransformer(delimiter = '\r') {
+  let buffer = '';
   return new TransformStream<string, string>({
     transform(chunk, controller) {
       buffer += chunk;
       const parts = buffer.split(delimiter);
-      buffer = parts.pop() ?? "";
+      buffer = parts.pop() ?? '';
       for (const p of parts) controller.enqueue(p);
     },
     flush(controller) {
       if (buffer) controller.enqueue(buffer);
-    }
+    },
   });
 }
-function hex(buf: Uint8Array) {
-  return Array.from(buf).map(b => b.toString(16).padStart(2, "0")).join(" ");
-}
-function modeStr() {
-  const p = PARITY === "none" ? "N" : PARITY === "even" ? "E" : "O";
-  return `${DATABITS}${p}${STOPBITS}`;
-}
 
-/* ==== Parser específico La Torre ==== */
-/** Ejemplo crudo: "D025500"  ->  25.500 kg */
-function parseLaTorre(rawIn: string): { ok: boolean; raw: string; kg?: number } {
+/* ===== Parser La Torre =====
+   Espera tramas “D######” (6 dígitos en gramos).  D025500 -> 25.500 kg
+*/
+function parseLaTorre(rawIn: string): { ok: boolean; kg?: number } {
   const raw = rawIn.trim();
   const m = raw.match(/^D(\d{6})$/i);
-  if (!m) return { ok: false, raw };
-  const grams = Number(m[1]); // 025500
-  if (!Number.isFinite(grams)) return { ok: false, raw };
-  return { ok: true, raw, kg: grams / 1000 }; // kg con 3 decimales
+  if (!m) return { ok: false };
+  const grams = Number(m[1]);
+  if (!Number.isFinite(grams)) return { ok: false };
+  return { ok: true, kg: grams / 1000 };
 }
 
-/* ==== Componente ==== */
-export default function LatorreReader() {
-  const [status, setStatus]     = useState<string>(supportsWebSerial ? "Listo para conectar" : "Web Serial no soportado");
-  const [weight, setWeight]     = useState<string>("-");   // kg
-  const [rawLine, setRawLine]   = useState<string>("-");
-  const [log, setLog]           = useState<string[]>([]);
-  const [portInfo, setPortInfo] = useState<string>("—");
+/* ===== Componente ===== */
+export default function BalanzaLaTorre() {
+  const [connected, setConnected] = useState(false);
+  const [displayKg, setDisplayKg] = useState('0.000');
 
-  const portRef   = useRef<SerialPortLike | null>(null);
+  const portRef = useRef<SerialPortLike | null>(null);
   const readerRef = useRef<ReadableStreamDefaultReader<string> | null>(null);
-  const keepRef   = useRef<boolean>(false);
+  const keepRef = useRef(false);
+
+  const lastSeenRef = useRef<number>(0);
+  const smoothRef = useRef<number[]>([]);
+
+  // watchdog: si no llegan tramas, volver a 0.000
+  useEffect(() => {
+    if (!connected) return;
+    const id = setInterval(() => {
+      if (!lastSeenRef.current) return;
+      const elapsed = Date.now() - lastSeenRef.current;
+      if (elapsed > FRAME_TIMEOUT_MS) {
+        smoothRef.current = [];
+        setDisplayKg('0.000');
+      }
+    }, 120);
+    return () => clearInterval(id);
+  }, [connected]);
 
   async function openPort(port: SerialPortLike) {
     try { readerRef.current?.releaseLock(); } catch {}
     try { await port.close?.(); } catch {}
-    await new Promise(r => setTimeout(r, 50));
+    await new Promise((r) => setTimeout(r, 50));
 
     await port.open({
       baudRate: BAUD,
       dataBits: DATABITS,
       parity: PARITY,
       stopBits: STOPBITS,
-      flowControl: "none"
+      flowControl: 'none',
     });
-    // Muchas balanzas necesitan DTR/RTS en true
-    if (port.setSignals) await port.setSignals({ dataTerminalReady: true, requestToSend: true });
-    await new Promise(r => setTimeout(r, 40));
-  }
-
-  function describePort(p: SerialPort) {
-    try {
-      const info = (p.getInfo?.() ?? {}) as any;
-      const toHex = (n: number) => "0x" + (n >>> 0).toString(16).toUpperCase().padStart(4, "0");
-      const vid = info.usbVendorId ? `VID ${toHex(info.usbVendorId)}` : "";
-      const pid = info.usbProductId ? `PID ${toHex(info.usbProductId)}` : "";
-      return [vid, pid].filter(Boolean).join(" ");
-    } catch { return "—"; }
+    if (port.setSignals)
+      await port.setSignals({ dataTerminalReady: true, requestToSend: true });
+    await new Promise((r) => setTimeout(r, 40));
   }
 
   async function connect() {
     try {
-      if (!supportsWebSerial) throw new Error("Navegador sin Web Serial");
+      if (!supportsWebSerial) throw new Error('Este navegador no soporta Web Serial');
 
-      setStatus("Selecciona el puerto (La Torre)...");
-      const port = await navigator.serial.requestPort();
-      portRef.current = port as SerialPortLike;
-      setPortInfo(describePort(portRef.current));
+      // Primera vez: popup; luego el navegador recuerda el permiso
+      const port = (await navigator.serial.requestPort()) as SerialPortLike;
+      portRef.current = port;
+      await openPort(port);
 
-      setStatus(`Abriendo @ ${BAUD} ${modeStr()}…`);
-      await openPort(portRef.current);
-
-      const decoder = new TextDecoderStream("ascii", { fatal: false, ignoreBOM: true });
-      const lined = portRef.current.readable!
-        .pipeThrough(decoder as any)
-        .pipeThrough(makeLineTransformer(DELIM));
+      const decoder = new TextDecoderStream('ascii', { fatal: false, ignoreBOM: true });
+      const lined = port.readable!.pipeThrough(decoder as any).pipeThrough(makeLineTransformer(DELIM));
       const reader = lined.getReader();
       readerRef.current = reader;
 
       keepRef.current = true;
-      setStatus(`Conectado y leyendo… (${BAUD} ${modeStr()}, ${DELIM === "\r\n" ? "CRLF" : "CR"})`);
+      setConnected(true);
+      lastSeenRef.current = 0;
+      smoothRef.current = [];
+      setDisplayKg('0.000');
 
       (async () => {
         while (keepRef.current) {
           const { value, done } = await reader.read();
           if (done) break;
-          if (typeof value !== "string") continue;
+          if (typeof value !== 'string') continue;
 
           const raw = value.trim();
           if (!raw) continue;
-          setRawLine(raw);
 
           const res = parseLaTorre(raw);
-          if (res.ok && typeof res?.kg === "number") {
-            setWeight(res?.kg?.toFixed(3));
-            setLog(p => [
-              `[LATORRE] RAW='${raw}' -> ${res?.kg?.toFixed(3)} kg`,
-              ...p
-            ].slice(0, 200));
-          } else {
-            setLog(p => [`[IGN] '${raw}'`, ...p].slice(0, 200));
-          }
-        }
-      })().catch(e => setLog(p => [`[read loop] ${String(e)}`, ...p].slice(0, 200)));
+          if (!res.ok || typeof res.kg !== 'number') continue;
 
-    } catch (e: any) {
-      setStatus(`Error: ${e?.message ?? e}`);
-      setLog(p => [`[connect] ${String(e?.message ?? e)}`, ...p].slice(0, 200));
+          // timestamp de “vida”
+          lastSeenRef.current = Date.now();
+
+          // suavizado simple
+          const arr = smoothRef.current;
+          arr.push(res.kg);
+          if (arr.length > SMOOTH_WINDOW) arr.shift();
+          const avg = arr.reduce((a, b) => a + b, 0) / arr.length;
+
+          setDisplayKg(avg.toFixed(3));
+        }
+      })().catch(() => {
+        // Si la lectura cae, dejamos el watchdog encargarse del 0.000
+      });
+    } catch (e) {
+      console.error(e);
+      setConnected(false);
+      setDisplayKg('0.000');
     }
   }
 
@@ -188,66 +180,79 @@ export default function LatorreReader() {
     keepRef.current = false;
     try { readerRef.current?.releaseLock(); } catch {}
     try { await portRef.current?.close?.(); } catch {}
-    setStatus("Desconectado");
-    setPortInfo("—");
-    portRef.current = null;
+    setConnected(false);
+    setDisplayKg('0.000');
   }
 
-  // Diagnóstico: leer bytes crudos del puerto por 150ms
-  async function peekBytes() {
-    if (!portRef.current?.readable) return;
-    const r = portRef.current.readable.getReader();
-    const { value } = await Promise.race([
-      r.read(),
-      new Promise<{ value?: Uint8Array }>(res => setTimeout(() => res({}), 150))
-    ]);
-    r.releaseLock();
-    if (value?.length) setLog(p => [`[RAW HEX] ${hex(value)}`, ...p].slice(0, 200));
-    else setLog(p => [`[RAW HEX] (sin datos en 150 ms)`, ...p].slice(0, 200));
-  }
-
+  // Limpieza on unmount
   useEffect(() => {
-    if (!supportsWebSerial) return;
-    const onConnect = () => setLog(p => ["[evento] Nuevo dispositivo serie conectado", ...p].slice(0, 200));
-    const onDisconnect = () => setLog(p => ["[evento] Dispositivo serie desconectado", ...p].slice(0, 200));
-    navigator.serial.addEventListener("connect", onConnect as any);
-    navigator.serial.addEventListener("disconnect", onDisconnect as any);
-    return () => {
-      navigator.serial.removeEventListener("connect", onConnect as any);
-      navigator.serial.removeEventListener("disconnect", onDisconnect as any);
-      disconnect();
-    };
+    return () => { disconnect(); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   return (
-    <div style={{ maxWidth: 820, margin: "40px auto", fontFamily: "system-ui, Arial", color: "#eee", background: "#111", padding: 16, borderRadius: 10 }}>
-      <h1>Lectura La Torre L1001 – Test - Option 2</h1>
-      <p style={{ marginTop: 0, color: "#aaa" }}>
-        Config puerto: <code>{BAUD} {modeStr()}</code> · fin de línea <code>{DELIM === "\r\n" ? "CRLF" : "CR"}</code> · Formato esperado <code>D######</code>
-      </p>
+    <div
+      style={{
+        background: '#0b0b0c',
+        color: '#eaeaea',
+        display: 'flex',
+        flexDirection: 'column',
+        alignItems: 'center',
+        justifyContent: 'center',
+        gap: 24,
+        fontFamily: 'system-ui, Arial, sans-serif',
+      }}
+    >
+      {/* <h1 style={{ margin: 0, fontWeight: 700, letterSpacing: 1 }}>Balanza La Torre</h1> */}
 
-      <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 12 }}>
-        <button onClick={connect} disabled={!supportsWebSerial || !!portRef.current}>Conectar</button>
-        <button onClick={disconnect} disabled={!portRef.current}>Desconectar</button>
-        <button onClick={peekBytes} disabled={!portRef.current}>Ver bytes crudos</button>
-        <span><strong>Estado:</strong> {status}</span>
+      <div
+        style={{
+          fontSize: '14vw',            // muy grande y responsivo
+          lineHeight: 1,
+          fontWeight: 800,
+          letterSpacing: '0.05em',
+          padding: '0.15em 0.25em',
+          borderRadius: 16,
+          background: '#111',
+          boxShadow: '0 0 40px rgba(0,0,0,.35) inset, 0 0 30px rgba(0,0,0,.4)',
+        //   minWidth: '70vw',
+          textAlign: 'center',
+        }}
+      >
+        {displayKg}
       </div>
 
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-        <div style={{ padding: 12, border: "1px solid #333", borderRadius: 8 }}>
-          <div style={{ fontSize: 12, color: "#999" }}>Puerto</div>
-          <div><code>{portInfo}</code></div>
-          <div style={{ marginTop: 8, fontSize: 12, color: "#999" }}>Último RAW</div>
-          <div style={{ fontSize: 24 }}>{rawLine}</div>
-          <div style={{ marginTop: 8, fontSize: 12, color: "#999" }}>Peso (kg)</div>
-          <div style={{ fontSize: 40, fontWeight: 800 }}>{weight}</div>
-        </div>
-
-        <pre style={{ height: 280, overflow: "auto", background: "#0a0a0a", color: "#c3f3c3", padding: 12, borderRadius: 8, margin: 0 }}>
-          {log.join("\n")}
-        </pre>
-      </div>
+      {!connected ? (
+        <button
+          onClick={connect}
+          style={{
+            padding: '14px 22px',
+            borderRadius: 12,
+            border: '1px solid #2a2a2a',
+            background: '#1c1c1f',
+            color: '#fff',
+            fontSize: 18,
+            cursor: 'pointer',
+          }}
+        >
+          Conectar balanza
+        </button>
+      ) : (
+        <button
+          onClick={disconnect}
+          style={{
+            padding: '10px 18px',
+            borderRadius: 10,
+            border: '1px solid #292929',
+            background: '#19191b',
+            color: '#bbb',
+            fontSize: 14,
+            cursor: 'pointer',
+          }}
+        >
+          Desconectar
+        </button>
+      )}
     </div>
   );
 }
