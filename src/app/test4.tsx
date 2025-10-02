@@ -43,16 +43,16 @@ const supportsWebSerial = typeof navigator !== "undefined" && "serial" in (navig
 const BAUD = 1200;
 
 /** ---------------- Opción 1: 7N1 (recomendada para descartar ParityError) -------- */
-const DATABITS: 7 | 8 = 7;
-const PARITY: "none" | "even" | "odd" = "none";
-const STOPBITS: 1 | 2 = 1;
-const DELIM: string = "\r"; // CR
-
-/** ---------------- Opción 2: 8N1 ----------------------------------------------- **/
-// const DATABITS: 7 | 8 = 8;
+// const DATABITS: 7 | 8 = 7;
 // const PARITY: "none" | "even" | "odd" = "none";
 // const STOPBITS: 1 | 2 = 1;
-// const DELIM = "\r";
+// const DELIM: string = "\r"; // CR
+
+/** ---------------- Opción 2: 8N1 ----------------------------------------------- **/
+const DATABITS: 7 | 8 = 8;
+const PARITY: "none" | "even" | "odd" = "none";
+const STOPBITS: 1 | 2 = 1;
+const DELIM: string = "\r";
 
 /** ---------------- Opción 3: 7E1 con CRLF ------------------------------------- **/
 // const DATABITS: 7 | 8 = 7;
