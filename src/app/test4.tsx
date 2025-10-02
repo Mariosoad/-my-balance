@@ -199,7 +199,7 @@ export default function LatorreReader() {
 
   return (
     <div style={{ maxWidth: 820, margin: "40px auto", fontFamily: "system-ui, Arial", color: "#eee", background: "#111", padding: 16, borderRadius: 10 }}>
-      <h1>Lectura La Torre L1001 – Tester Puerto Serie</h1>
+      <h1>Lectura La Torre L1001 – Test 02/10/2025</h1>
       <p style={{ marginTop: 0, color: "#aaa" }}>
         Config puerto: <code>{BAUD} 7E1</code> · fin de línea <code>CR</code> · Formato esperado <code>D######</code>
       </p>
